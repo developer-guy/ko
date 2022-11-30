@@ -52,10 +52,15 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/tools/go/packages"
+
+	"github.com/in-toto/in-toto-golang/in_toto"
+	slsa "github.com/in-toto/in-toto-golang/in_toto/slsa_provenance/v0.2"
+	"github.com/package-url/packageurl-go"
 )
 
 const (
 	defaultAppFilename = "ko-app"
+	PredicateType = "https://github.com/ko-build/ko@v1"
 )
 
 // GetBase takes an importpath and returns a base image reference and base image (or index).
@@ -85,6 +90,7 @@ type gobuild struct {
 	dir                  string
 	labels               map[string]string
 	semaphore            *semaphore.Weighted
+	slsaProvenance 	in_toto.ProvenanceStatement
 
 	cache *layerCache
 }
@@ -139,6 +145,14 @@ func (gbo *gobuildOpener) Open() (Interface, error) {
 			diffToDesc:  map[string]diffIDToDescriptor{},
 		},
 		semaphore: semaphore.NewWeighted(int64(gbo.jobs)),
+		slsaProvenance: in_toto.ProvenanceStatement{
+			StatementHeader: in_toto.StatementHeader{
+				Type:          "https://in-toto.io/Statement/v0.1",
+				PredicateType: PredicateType,
+				Subject:       []in_toto.Subject{},
+			},
+			Predicate:   slsa.ProvenancePredicate{},
+		},
 	}, nil
 }
 
@@ -972,6 +986,21 @@ func (g *gobuild) Build(ctx context.Context, s string) (Result, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	baseDigest, err := base.Digest()
+	if err != nil {
+		return nil, err
+	}
+
+	tag, ok := baseRef.(name.Tag)
+	if !ok {
+		return nil, fmt.Errorf("base image %q is not a tag", baseRef)
+	}
+
+	g.slsaProvenance.Predicate.Materials = append(g.slsaProvenance.Predicate.Materials, slsa.ProvenanceMaterial{
+		URI:    packageurl.NewPackageURL(packageurl.TypeOCI, "", baseRef.Name(), tag.TagStr(), nil, "").String(),
+		Digest: slsa.DigestSet{baseDigest.Algorithm: baseDigest.Hex},
+	})
 
 	// Determine what kind of base we have and if we should publish an image or an index.
 	mt, err := base.MediaType()
